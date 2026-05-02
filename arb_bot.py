@@ -86,7 +86,8 @@ class HTXFutureWebSocketFixed:
 
         try:
             url = "https://api.hbdm.com/linear-swap-api/v1/swap_contract_info"
-            async with aiohttp.ClientSession() as session:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     text = await resp.text()
                     data = json.loads(text)
@@ -224,6 +225,10 @@ class HTXFutureWebSocketFixed:
     async def connect(self, symbols: list):
         endpoint = self.get_endpoint()
 
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+
         try:
             async with websockets.connect(
                     endpoint,
@@ -233,6 +238,7 @@ class HTXFutureWebSocketFixed:
                     compression=None,
                     max_size=2 * 1024 * 1024,
                     max_queue=16,
+                    ssl=ssl_context,
             ) as websocket:
 
                 self.ws = websocket
@@ -346,7 +352,8 @@ class HTXFutureWebSocketFixed:
             }
 
             try:
-                async with aiohttp.ClientSession() as session:
+                connector = aiohttp.TCPConnector(ssl=False)
+                async with aiohttp.ClientSession(connector=connector) as session:
                     async with session.post(
                         url,
                         params=sign_params,
@@ -419,8 +426,8 @@ class HTXFutureWebSocketFixed:
             url = f"https://api.hbdm.com{endpoint}"
             headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
 
-            # BUG FIX: order placement must be POST, not GET
-            async with aiohttp.ClientSession() as session:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
                 async with session.post(
                     url,
                     params=sign_params,
@@ -919,6 +926,7 @@ class OKXFuturesWebSocket:
                     'instId': inst_id,
                     'tdMode': 'cross',
                     'side': side,
+                    'posSide': 'long' if side == 'buy' else 'short',
                     'ordType': 'market',
                     'sz': str(contract_qty_int)
                 }]
