@@ -1040,6 +1040,8 @@ class TradeManager:
 
         self.total_open_trades = 0
         self.closing_trades: set = set()
+        self.failed_symbols: Dict[str, float] = {}
+        self.fail_cooldown = 30.0
 
         self.trades_lock = None
 
@@ -1197,6 +1199,10 @@ class TradeManager:
             return
 
         if spread_percent >= 1.0:
+            fail_ts = self.failed_symbols.get(symbol)
+            if fail_ts and time.time() - fail_ts < self.fail_cooldown:
+                return
+
             async with self.trades_lock:
                 if symbol in self.opening_trades:
                     logger.debug(f"{symbol}: position already opening, skipping")
@@ -1321,6 +1327,7 @@ class TradeManager:
 
                 if htx_failed:
                     logger.error(f"HTX ERROR: {htx_result}")
+                    self.failed_symbols[symbol] = time.time()
                     async with self.trades_lock:
                         if symbol in self.active_trades:
                             del self.active_trades[symbol]
@@ -1335,6 +1342,7 @@ class TradeManager:
                 if okx_failed:
                     logger.error(f"OKX ERROR: {okx_result}")
                     logger.warning(f"HTX succeeded but OKX failed - positions desynchronized!")
+                    self.failed_symbols[symbol] = time.time()
                     async with self.trades_lock:
                         if symbol in self.active_trades:
                             del self.active_trades[symbol]
@@ -1346,6 +1354,7 @@ class TradeManager:
 
             except asyncio.TimeoutError:
                 logger.error(f"TIMEOUT sending orders {symbol} (5s)")
+                self.failed_symbols[symbol] = time.time()
                 async with self.trades_lock:
                     if symbol in self.active_trades:
                         del self.active_trades[symbol]
@@ -1356,6 +1365,7 @@ class TradeManager:
                 return
             except Exception as e:
                 logger.error(f"CRITICAL ERROR sending orders: {e}")
+                self.failed_symbols[symbol] = time.time()
                 async with self.trades_lock:
                     if symbol in self.active_trades:
                         del self.active_trades[symbol]
