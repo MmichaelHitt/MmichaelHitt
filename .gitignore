@@ -1,0 +1,7 @@
+.env
+*.pyc
+__pycache__/
+.pytest_cache/
+*.log
+logbtc-updown-5m.txt
+trades.csv
