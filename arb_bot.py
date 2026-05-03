@@ -469,8 +469,8 @@ class OKXFuturesWebSocket:
     }
 
     REST_ENDPOINTS = [
+        "https://www.okx.com",
         "https://eea.okx.com",
-        "https://okx.com",
     ]
 
     def __init__(self, api_key: Optional[str] = None, secret_key: Optional[str] = None,
@@ -938,7 +938,6 @@ class OKXFuturesWebSocket:
                 'op': 'order',
                 'args': [{
                     'instId': inst_id,
-                    'instType': 'SWAP',
                     'tdMode': 'cross',
                     'side': side,
                     'posSide': 'long' if side == 'buy' else 'short',
