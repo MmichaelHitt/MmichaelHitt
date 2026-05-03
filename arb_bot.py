@@ -309,7 +309,15 @@ class HTXFutureWebSocketFixed:
                     actual_volume = volume / multiplier
                     logger.debug(f"HTX {symbol}: volume {volume} / multiplier {multiplier} = {actual_volume}")
 
-            logger.info(f"Sending HTX order: {side.upper()} {actual_volume} {symbol}")
+            htx_contracts = int(actual_volume)
+            if htx_contracts < 1:
+                logger.error(
+                    f"HTX {symbol}: 0 contracts (tokens={actual_volume:.4f}, mult={self.contract_multipliers.get(symbol,1)}). "
+                    f"Increase position_usdt."
+                )
+                return {"error": "zero contracts"}
+
+            logger.info(f"Sending HTX order: {side.upper()} {htx_contracts} contracts {symbol}")
 
             endpoint = '/linear-swap-api/v1/swap_order'
             order_params = {
@@ -318,7 +326,7 @@ class HTXFutureWebSocketFixed:
                 'direction': side,
                 'offset': 'open',
                 'lever_rate': leverage,
-                'volume': int(actual_volume),
+                'volume': htx_contracts,
                 'order_price_type': 'optimal_20'
             }
 
@@ -918,6 +926,12 @@ class OKXFuturesWebSocket:
 
             req_id = str(int(time.time() * 1000000))
             contract_qty_int = int(actual_qty)
+            if contract_qty_int < 1:
+                logger.error(
+                    f"OKX {inst_id}: 0 contracts (tokens={actual_qty:.4f}, mult={self.contract_multipliers.get(inst_id,1)}). "
+                    f"Increase position_usdt."
+                )
+                return {"error": "zero contracts"}
 
             order_msg = {
                 'id': req_id,
@@ -1219,6 +1233,16 @@ class TradeManager:
 
                 if qty <= 0:
                     logger.warning(f"Position size {symbol} <= 0 ({qty}), skipping")
+                    return
+
+                htx_mult = self.htx_bot.contract_multipliers.get(symbol, 1.0) or 1.0
+                okx_mult = self.okx_bot.contract_multipliers.get(okx_symbol, 1.0) or 1.0
+                if int(qty / htx_mult) < 1 or int(qty / okx_mult) < 1:
+                    logger.debug(
+                        f"{symbol}: min contract not reached "
+                        f"(HTX={qty/htx_mult:.3f}, OKX={qty/okx_mult:.3f} contracts). "
+                        f"Increase position_usdt (current={self.position_usdt})."
+                    )
                     return
 
                 direction = "LONG HTX / SHORT OKX" if okx_mid_fresh > htx_mid_fresh else "SHORT HTX / LONG OKX"
