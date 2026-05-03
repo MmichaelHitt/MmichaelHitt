@@ -1,6 +1,15 @@
 """Main asyncio entry point for the Polymarket BTC Up/Down trading bot."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Ensure the project root (parent of btc_bot/) is on sys.path when running
+# bot.py directly (e.g. from inside btc_bot/ in PyCharm or CLI).
+_project_root = Path(__file__).resolve().parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 import asyncio
 import csv
 import os
