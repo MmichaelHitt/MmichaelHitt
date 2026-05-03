@@ -922,7 +922,7 @@ class OKXFuturesWebSocket:
 
             if not self.ws_private or not self.authenticated:
                 logger.warning(f"OKX private WebSocket not connected, trying REST fallback")
-                return await self._place_order_rest(inst_id, side, contract_qty)
+                return await self._place_order_rest(inst_id, side, actual_qty)
 
             req_id = str(int(time.time() * 1000000))
             contract_qty_int = int(actual_qty)
@@ -938,6 +938,7 @@ class OKXFuturesWebSocket:
                 'op': 'order',
                 'args': [{
                     'instId': inst_id,
+                    'instType': 'SWAP',
                     'tdMode': 'cross',
                     'side': side,
                     'posSide': 'long' if side == 'buy' else 'short',
@@ -962,32 +963,33 @@ class OKXFuturesWebSocket:
                 logger.info(f"OKX {side.upper()} OK: ID={order_id}")
                 return result
             else:
-                error_msg = result.get('msg', str(result)) if result else "Empty response from OKX"
-                logger.error(f"OKX Error: {error_msg}")
-                logger.error(f"Full response: {result}")
-                return result
+                s_data = result.get('data', [{}])[0] if result.get('data') else {}
+                s_code = s_data.get('sCode', result.get('code', ''))
+                s_msg = s_data.get('sMsg', '') or result.get('msg', '') or str(result)
+                logger.error(f"OKX WebSocket [{s_code}]: {s_msg} — switching to REST")
+                return await self._place_order_rest(inst_id, side, actual_qty)
 
         except asyncio.TimeoutError:
             logger.warning(f"OKX WebSocket timeout, trying REST fallback")
-            return await self._place_order_rest(inst_id, side, contract_qty)
+            return await self._place_order_rest(inst_id, side, actual_qty)
         except Exception as e:
             logger.error(f"OKX Order Error: {e}")
             traceback.print_exc()
             return {"error": str(e)}
 
-    async def _place_order_rest(self, inst_id: str, side: str, contract_qty: float) -> dict:
-        """REST fallback when WebSocket is unavailable"""
+    async def _place_order_rest(self, inst_id: str, side: str, actual_qty: float) -> dict:
+        """REST fallback — actual_qty is already the contract count (after multiplier division)"""
         try:
-            logger.info(f"OKX Order (REST fallback): {side.upper()} {contract_qty} {inst_id}")
+            contracts = max(1, int(actual_qty))
+            logger.info(f"OKX Order (REST fallback): {side.upper()} {contracts} contracts {inst_id}")
 
             order_data = {
                 "instId": inst_id,
                 "tdMode": "cross",
                 "side": side,
                 "ordType": "market",
-                "sz": str(round(contract_qty, 4)),
+                "sz": str(contracts),
                 "clOrdId": f"okx_{int(time.time() * 1000)}",
-                # NOTE: posSide required only for hedge mode accounts; remove if using one-way mode
                 "posSide": "long" if side == "buy" else "short",
             }
 
@@ -1038,6 +1040,7 @@ class TradeManager:
         self.max_trades_per_exchange = 2
 
         self.total_open_trades = 0
+        self.closing_trades: set = set()
 
         self.trades_lock = None
 
@@ -1136,6 +1139,12 @@ class TradeManager:
                 if spread_percent < 0.05:
                     logger.debug(f"{symbol}: spread {spread_percent:.4f}% too narrow, wait for 0.05-0.1%")
                     return
+
+                async with self.trades_lock:
+                    if symbol in self.closing_trades:
+                        return
+                    self.closing_trades.add(symbol)
+
                 trade = self.active_trades[symbol]
                 profit_spread = trade['entry_spread'] - spread_percent
                 hold_time = time.time() - trade['entry_time']
@@ -1166,9 +1175,9 @@ class TradeManager:
                             timeout=5.0
                         )
 
-                    if isinstance(results[0], Exception):
+                    if isinstance(results[0], Exception) or (isinstance(results[0], dict) and results[0].get('status') != 'ok'):
                         logger.error(f"HTX close error {symbol}: {results[0]}")
-                    if isinstance(results[1], Exception):
+                    if isinstance(results[1], Exception) or (isinstance(results[1], dict) and results[1].get('code') not in ('0', None)):
                         logger.error(f"OKX close error {symbol}: {results[1]}")
 
                     logger.info(f"Close orders sent for {symbol}")
@@ -1179,6 +1188,7 @@ class TradeManager:
                 finally:
                     if symbol in self.active_trades:
                         del self.active_trades[symbol]
+                    self.closing_trades.discard(symbol)
                     self.active_htx_trades = max(0, self.active_htx_trades - 1)
                     self.active_okx_trades = max(0, self.active_okx_trades - 1)
                     self.total_open_trades = max(0, self.total_open_trades - 1)
@@ -1303,7 +1313,14 @@ class TradeManager:
                 htx_result = results[0]
                 okx_result = results[1]
 
-                if isinstance(htx_result, Exception):
+                htx_failed = isinstance(htx_result, Exception) or (
+                    isinstance(htx_result, dict) and htx_result.get('status') != 'ok'
+                )
+                okx_failed = isinstance(okx_result, Exception) or (
+                    isinstance(okx_result, dict) and okx_result.get('code') not in ('0', None)
+                )
+
+                if htx_failed:
                     logger.error(f"HTX ERROR: {htx_result}")
                     async with self.trades_lock:
                         if symbol in self.active_trades:
@@ -1312,11 +1329,11 @@ class TradeManager:
                         self.active_htx_trades = max(0, self.active_htx_trades - 1)
                         self.active_okx_trades = max(0, self.active_okx_trades - 1)
                         self.total_open_trades = max(0, self.total_open_trades - 1)
-                    if not isinstance(okx_result, Exception):
+                    if not okx_failed:
                         logger.warning(f"OKX succeeded but HTX failed - positions desynchronized!")
                     return
 
-                if isinstance(okx_result, Exception):
+                if okx_failed:
                     logger.error(f"OKX ERROR: {okx_result}")
                     logger.warning(f"HTX succeeded but OKX failed - positions desynchronized!")
                     async with self.trades_lock:
