@@ -189,7 +189,7 @@ async def main_async(cfg: Config, logger) -> None:
     logger.info("=" * 60)
 
     logger.info("Searching for active round...")
-    market = find_latest_active_market(proxy_url=cfg.proxy_url)
+    market = find_latest_active_market(proxy_url=cfg.proxy_url, slug_override=cfg.market_slug_override)
     logger.info("Active round: %s  end=%s", market["slug"], market["end_date"])
 
     state = BotState()

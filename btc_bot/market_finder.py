@@ -73,8 +73,17 @@ def _scan_slugs(base_ts: int, count: int = 10, proxy_url: str = "") -> list[dict
     return found
 
 
-def find_latest_active_market(proxy_url: str = "") -> dict:
+def find_latest_active_market(proxy_url: str = "", slug_override: str = "") -> dict:
     """Find the current active round at startup."""
+    if slug_override:
+        logger.info("[scan] Using MARKET_SLUG_OVERRIDE: %s", slug_override)
+        result = _try_slug(slug_override, proxy_url=proxy_url)
+        if result is None:
+            raise RuntimeError(f"MARKET_SLUG_OVERRIDE slug '{slug_override}' not found or expired.")
+        result.pop("end_dt", None)
+        result.pop("question", None)
+        return result
+
     now = datetime.now(timezone.utc)
     now_ts = int(now.timestamp())
     base_ts = (now_ts // 300) * 300 - 3 * 300

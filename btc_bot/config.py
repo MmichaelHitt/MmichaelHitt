@@ -34,6 +34,9 @@ class Config:
     # Mode
     dry_run: bool = False
 
+    # Manual market override (optional)
+    market_slug_override: str = ""
+
 
 def load_config(argv: list[str] | None = None) -> Config:
     parser = argparse.ArgumentParser(description="Polymarket BTC Up/Down trading bot")
@@ -55,4 +58,5 @@ def load_config(argv: list[str] | None = None) -> Config:
         poly_wallet_private_key=os.getenv("POLY_WALLET_PRIVATE_KEY", ""),
         proxy_url=os.getenv("PROXY_URL", "http://mh2457652:r8hzakNM2T@82.206.73.210:50100"),
         dry_run=dry_run,
+        market_slug_override=os.getenv("MARKET_SLUG_OVERRIDE", ""),
     )
