@@ -23,6 +23,7 @@ class PriceFeed:
 
     def __init__(self, proxy_url: str = "") -> None:
         self._proxy_url = proxy_url
+        self._proxy_ok = True
         self._lock = threading.Lock()
         self._binance_prices: deque[tuple[float, float]] = deque(maxlen=500)
         self._okx_prices: deque[tuple[float, float]] = deque(maxlen=500)
@@ -50,6 +51,22 @@ class PriceFeed:
         with self._lock:
             self._okx_prices.append((time.time(), price))
 
+    # ── Proxy helpers ────────────────────────────────────────────────────────
+
+    def _proxy_kwargs(self) -> dict:
+        """Return run_forever proxy kwargs; empty dict if proxy disabled/failed."""
+        if not self._proxy_ok or not self._proxy_url:
+            return {}
+        host, port, auth = _parse_proxy(self._proxy_url)
+        if host is None:
+            return {}
+        return {"http_proxy_host": host, "http_proxy_port": port, "http_proxy_auth": auth}
+
+    def _check_proxy_error(self, error) -> None:
+        msg = str(error).lower()
+        if "proxy" in msg or "only http" in msg or "socks" in msg:
+            self._proxy_ok = False
+
     # ── Binance WS ──────────────────────────────────────────────────────────
 
     def _binance_on_message(self, ws, message: str) -> None:
@@ -60,6 +77,7 @@ class PriceFeed:
             pass
 
     def _binance_on_error(self, ws, error) -> None:
+        self._check_proxy_error(error)
         logger.error("[Binance] Error: %s", error)
 
     def _binance_on_close(self, ws, *args) -> None:
@@ -69,18 +87,13 @@ class PriceFeed:
         def run() -> None:
             while self._running:
                 try:
-                    proxy_host, proxy_port, proxy_auth = _parse_proxy(self._proxy_url)
                     ws = websocket.WebSocketApp(
                         BINANCE_WSS,
                         on_message=self._binance_on_message,
                         on_error=self._binance_on_error,
                         on_close=self._binance_on_close,
                     )
-                    ws.run_forever(
-                        http_proxy_host=proxy_host,
-                        http_proxy_port=proxy_port,
-                        http_proxy_auth=proxy_auth,
-                    )
+                    ws.run_forever(**self._proxy_kwargs())
                 except Exception as e:
                     logger.error("[Binance] Connection error: %s", e)
                 if self._running:
@@ -104,6 +117,7 @@ class PriceFeed:
             pass
 
     def _okx_on_error(self, ws, error) -> None:
+        self._check_proxy_error(error)
         logger.error("[OKX] Error: %s", error)
 
     def _okx_on_close(self, ws, *args) -> None:
@@ -113,7 +127,6 @@ class PriceFeed:
         def run() -> None:
             while self._running:
                 try:
-                    proxy_host, proxy_port, proxy_auth = _parse_proxy(self._proxy_url)
                     ws = websocket.WebSocketApp(
                         OKX_WSS,
                         on_open=self._okx_on_open,
@@ -121,12 +134,7 @@ class PriceFeed:
                         on_error=self._okx_on_error,
                         on_close=self._okx_on_close,
                     )
-                    ws.run_forever(
-                        ping_interval=20,
-                        http_proxy_host=proxy_host,
-                        http_proxy_port=proxy_port,
-                        http_proxy_auth=proxy_auth,
-                    )
+                    ws.run_forever(ping_interval=20, **self._proxy_kwargs())
                 except Exception as e:
                     logger.error("[OKX] Connection error: %s", e)
                 if self._running:

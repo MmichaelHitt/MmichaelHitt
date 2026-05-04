@@ -22,6 +22,7 @@ class ClobStream:
         self._up_token = up_token
         self._dn_token = dn_token
         self._proxy_url = proxy_url
+        self._proxy_ok = True
         self._lock = threading.Lock()
 
         self._up_bid: float | None = None
@@ -53,6 +54,21 @@ class ClobStream:
     def dn_bid(self) -> float | None:
         with self._lock:
             return self._dn_bid
+
+    # ── Proxy helpers ─────────────────────────────────────────────────────────
+
+    def _proxy_kwargs(self) -> dict:
+        if not self._proxy_ok or not self._proxy_url:
+            return {}
+        host, port, auth = _parse_proxy(self._proxy_url)
+        if host is None:
+            return {}
+        return {"http_proxy_host": host, "http_proxy_port": port, "http_proxy_auth": auth}
+
+    def _check_proxy_error(self, error) -> None:
+        msg = str(error).lower()
+        if "proxy" in msg or "only http" in msg or "socks" in msg:
+            self._proxy_ok = False
 
     # ── WS callbacks ─────────────────────────────────────────────────────────
 
@@ -141,6 +157,7 @@ class ClobStream:
                         self._dn_ask = round(float(ba) * 100, 1)
 
     def _on_error(self, ws, error) -> None:
+        self._check_proxy_error(error)
         logger.error("[CLOB WSS] Error: %s", error)
 
     def _on_close(self, ws, *args) -> None:
@@ -178,7 +195,6 @@ class ClobStream:
         def run() -> None:
             while self._running:
                 try:
-                    proxy_host, proxy_port, proxy_auth = _parse_proxy(self._proxy_url)
                     ws = websocket.WebSocketApp(
                         CLOB_WSS,
                         on_open=self._on_open,
@@ -188,11 +204,7 @@ class ClobStream:
                     )
                     with self._lock:
                         self._ws = ws
-                    ws.run_forever(
-                        http_proxy_host=proxy_host,
-                        http_proxy_port=proxy_port,
-                        http_proxy_auth=proxy_auth,
-                    )
+                    ws.run_forever(**self._proxy_kwargs())
                 except Exception as e:
                     logger.error("[CLOB WSS] Connection error: %s", e)
                 if self._running:
