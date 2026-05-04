@@ -88,6 +88,7 @@ class HTXTrader:
         self.prv_authed    = False
         self.price_cache: Dict[str, dict] = {}
         self.order_futures: Dict[str, asyncio.Future] = {}
+        self.ws_place_futures: Dict[str, asyncio.Future] = {}
         self.multipliers: Dict[str, float] = {}
         self.symbols: List[str] = []
         self.on_tick       = None
@@ -127,7 +128,7 @@ class HTXTrader:
                 'contract_code': 'BTC-USDT', 'client_order_id': 1,
                 'direction': 'buy', 'offset': 'open',
                 'lever_rate': 1, 'volume': 0,
-                'order_price_type': 'optimal_5_ioc',
+                'order_price_type': 'opponent_ioc',
             }
             await self._http_post(params_w)
         except Exception:
@@ -167,6 +168,7 @@ class HTXTrader:
             max_size=10**7, compression=None, ssl=_SSL_CTX)
         await self._auth_prv()
         asyncio.create_task(self._prv_loop())
+        asyncio.create_task(self._presign_loop())
         for s in symbols:
             await self.ws_prv.send(json.dumps({'op': 'sub', 'topic': f'orders.{s}'}))
         print("✅ [HTX] Private WS")
@@ -272,7 +274,13 @@ class HTXTrader:
                     if op == 'ping':
                         await self.ws_prv.send(json.dumps({'op': 'pong', 'ts': d['ts']}))
                         continue
-                    if op == 'notify' and 'orders' in topic:
+                    if op == 'place':
+                        cid_p = str(d.get('cid', ''))
+                        f_p   = self.ws_place_futures.get(cid_p)
+                        if f_p and not f_p.done():
+                            f_p.set_result(d)
+                        self.ws_place_futures.pop(cid_p, None)
+                    elif op == 'notify' and 'orders' in topic:
                         cid_raw = d.get('client_order_id', '')
                         if not cid_raw:
                             continue
@@ -293,6 +301,10 @@ class HTXTrader:
                     if not f.done():
                         f.set_exception(Exception("HTX prv WS обрыв"))
                 self.order_futures.clear()
+                for f in self.ws_place_futures.values():
+                    if not f.done():
+                        f.set_exception(Exception("HTX prv WS обрыв"))
+                self.ws_place_futures.clear()
                 if not self.running:
                     return
                 print("⚠️  [HTX] Prv WS обрыв, переподключение...")
@@ -367,6 +379,40 @@ class HTXTrader:
         except Exception as e:
             return {'status': 'error', 'err-msg': str(e)}
 
+    async def _presign_loop(self):
+        """Обновляет REST-подпись каждые 100мс — минимизирует задержку на REST fallback."""
+        while self.running:
+            ts = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
+            if ts != self._sig_cache_ts:
+                self._sig_cache_ts = ts
+                self._sig_cache_qp = self._build_sig(ts)
+            await asyncio.sleep(0.1)
+
+    async def _ws_place(self, cid: int, symbol: str, direction: str,
+                        offset: str, volume: int) -> dict:
+        """Размещает ордер через уже открытый приватный WS (без HTTP overhead)."""
+        cid_str   = str(cid)
+        place_fut = asyncio.Future()
+        self.ws_place_futures[cid_str] = place_fut
+        msg = json.dumps({
+            'op':               'place',
+            'cid':              cid_str,
+            'contract_code':    symbol,
+            'contract_type':    'swap',
+            'client_order_id':  cid,
+            'volume':           volume,
+            'direction':        direction,
+            'offset':           offset,
+            'lever_rate':       1,
+            'order_price_type': 'opponent_ioc',
+        })
+        await self.ws_prv.send(msg)
+        try:
+            return await asyncio.wait_for(place_fut, timeout=1.5)
+        except asyncio.TimeoutError:
+            self.ws_place_futures.pop(cid_str, None)
+            raise
+
     async def _http_post(self, params: dict) -> dict:
         ts = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
         if ts != self._sig_cache_ts:
@@ -383,175 +429,230 @@ class HTXTrader:
         cid_str = None
         t_start = time.perf_counter()
         try:
-            cid     = self._next_cid()
-            cid_str = str(cid)
-            params  = {
-                'contract_code':    symbol,
-                'client_order_id':  cid,
-                'direction':        side,
-                'offset':           'open',
-                'lever_rate':       1,
-                'volume':           volume,
-                'order_price_type': 'optimal_5_ioc',
-            }
+            cid        = self._next_cid()
+            cid_str    = str(cid)
             notify_fut = asyncio.Future()
             self.order_futures[cid_str] = notify_fut
-            http_task = asyncio.create_task(self._http_post(params))
 
-            async def _wait_notify():
-                return await notify_fut
-
-            notify_task = asyncio.create_task(_wait_notify())
-            done, pending = await asyncio.wait(
-                [http_task, notify_task], timeout=5.0, return_when=asyncio.FIRST_COMPLETED)
-
+            # ── Fast path: WS ордер (без HTTP overhead) ───────────────────
+            ws_ok       = False
             http_result = None
-            ws_data     = None
+            try:
+                ws_ack = await self._ws_place(cid, symbol, side, 'open', volume)
+                err_c  = ws_ack.get('err-code', 0)
+                if err_c != 0:
+                    self.order_futures.pop(cid_str, None)
+                    err_msg = ws_ack.get('err-msg', '')
+                    print(f"❌ [HTX] WS отклонён [{err_c}]: {err_msg}")
+                    if 'margin' in str(err_msg).lower() or 'Insufficient' in str(err_msg):
+                        print(f"\n🛑 СТОП: Недостаточно маржи — бот остановлен!")
+                        raise SystemExit(1)
+                    if 'kyc' in str(err_msg).lower() or 'identity' in str(err_msg).lower():
+                        print(f"\n🛑 HTX требует KYC верификацию [{err_c}]")
+                        self._kyc_required = True
+                        return False, 0.0, (time.perf_counter()-t_start)*1000, True
+                    return False, 0.0, (time.perf_counter()-t_start)*1000, True
+                ws_ok  = True
+                oid_ws = ws_ack.get('data', {}).get('order_id', '?')
+                t_ws   = (time.perf_counter() - t_start) * 1000
+                print(f"   [HTX] WS принят id={oid_ws} ({t_ws:.0f}ms), ждём исполнения...")
+            except SystemExit:
+                raise
+            except Exception as ws_err:
+                self.ws_place_futures.pop(cid_str, None)
+                print(f"   [HTX] WS недоступен ({ws_err.__class__.__name__}), fallback REST...")
 
-            if http_task in done:
-                try:
-                    http_result = http_task.result()
-                except Exception as e:
-                    print(f"❌ [HTX] HTTP error: {e}")
+            # ── Slow path: REST HTTP ───────────────────────────────────────
+            if not ws_ok:
+                params = {
+                    'contract_code':    symbol,
+                    'client_order_id':  cid,
+                    'direction':        side,
+                    'offset':           'open',
+                    'lever_rate':       1,
+                    'volume':           volume,
+                    'order_price_type': 'opponent_ioc',
+                }
+                http_task   = asyncio.create_task(self._http_post(params))
+                notify_task = asyncio.create_task(asyncio.shield(notify_fut))
+                done, pending = await asyncio.wait(
+                    [http_task, notify_task], timeout=5.0, return_when=asyncio.FIRST_COMPLETED)
+                ws_data_rest = None
+                if http_task in done:
+                    try: http_result = http_task.result()
+                    except Exception as e: print(f"❌ [HTX] HTTP error: {e}")
+                if notify_task in done:
+                    try: ws_data_rest = notify_task.result()
+                    except Exception: pass
 
-            if notify_task in done:
-                try:
-                    ws_data = notify_task.result()
-                except Exception:
-                    pass
+                if http_result is not None and http_result.get('status') != 'ok':
+                    for t in pending: t.cancel()
+                    self.order_futures.pop(cid_str, None)
+                    err_code = http_result.get('err-code') or ''
+                    err_msg  = http_result.get('err-msg') or str(http_result)
+                    print(f"❌ [HTX] REST отклонён [{err_code}]: {err_msg}")
+                    if 'margin' in str(err_msg).lower() or 'Insufficient' in str(err_msg):
+                        print(f"\n🛑 СТОП: Недостаточно маржи — бот остановлен!")
+                        raise SystemExit(1)
+                    if 'kyc' in str(err_msg).lower() or 'identity' in str(err_msg).lower():
+                        print(f"\n🛑 HTX требует KYC верификацию [{err_code}]")
+                        self._kyc_required = True
+                        return False, 0.0, (time.perf_counter()-t_start)*1000, True
+                    return False, 0.0, (time.perf_counter()-t_start)*1000, True
 
-            if http_result is not None and http_result.get('status') != 'ok':
+                if http_result is not None and http_result.get('status') == 'ok':
+                    oid = http_result.get('data', {}).get('order_id', '?')
+                    print(f"   [HTX] REST принят id={oid} ({(time.perf_counter()-t_start)*1000:.0f}ms)...")
+
+                if ws_data_rest is None:
+                    try:
+                        elapsed_so_far = time.perf_counter() - t_start
+                        ws_data_rest = await asyncio.wait_for(
+                            notify_fut, timeout=max(0.05, 0.3 - elapsed_so_far + 0.127))
+                    except asyncio.TimeoutError:
+                        pass
                 for t in pending: t.cancel()
                 self.order_futures.pop(cid_str, None)
-                err_code = http_result.get('err-code') or http_result.get('err_code', '')
-                err_msg  = http_result.get('err-msg') or http_result.get('err_msg') or str(http_result)
-                print(f"❌ [HTX] Отклонён [{err_code}]: {err_msg}")
-                if 'margin' in str(err_msg).lower() or 'Insufficient' in str(err_msg):
-                    print(f"\n🛑 СТОП: Недостаточно маржи — бот остановлен!")
-                    raise SystemExit(1)
-                if 'kyc' in str(err_msg).lower() or 'identity verification' in str(err_msg).lower():
-                    print(f"\n🛑 HTX требует KYC верификацию [{err_code}]")
-                    print(f"   Зайди на htx.com → Futures → активируй деривативный аккаунт")
-                    self._kyc_required = True
-                    return False, 0.0, (time.perf_counter()-t_start)*1000, True
-                return False, 0.0, (time.perf_counter()-t_start)*1000, True
+                return await self._rest_poll_or_parse(
+                    ws_data_rest, symbol, side, volume, cid_str, t_start, http_result, 'REST')
 
-            if http_result is not None and http_result.get('status') == 'ok':
-                oid = http_result.get('data', {}).get('order_id', '?')
-                t_http = (time.perf_counter() - t_start) * 1000
-                print(f"   [HTX] Принят id={oid} ({t_http:.0f}ms), ждём исполнения...")
+            # ── WS path: ждём fill-notify ──────────────────────────────────
+            ws_data = None
+            try:
+                ws_data = await asyncio.wait_for(notify_fut, timeout=2.5)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                self.order_futures.pop(cid_str, None)
+            return await self._rest_poll_or_parse(
+                ws_data, symbol, side, volume, cid_str, t_start, None, 'WS')
 
-            if ws_data is None:
-                try:
-                    elapsed_so_far = time.perf_counter() - t_start
-                    ws_timeout = max(0.05, 0.3 - elapsed_so_far + 0.127)
-                    ws_data = await asyncio.wait_for(notify_fut, timeout=ws_timeout)
-                except asyncio.TimeoutError:
-                    ws_data = None
-
-            for t in pending: t.cancel()
-            self.order_futures.pop(cid_str, None)
-
-            if ws_data is not None:
-                trade_vol = float(ws_data.get('trade_volume', 0) or 0)
-                err_code  = ws_data.get('err_code', 0)
-                status    = ws_data.get('status', '')
-                order_id  = ws_data.get('order_id', '?')
-                if err_code and err_code != 0:
-                    err_msg_ws = ws_data.get('err_msg', '')
-                    print(f"❌ [HTX] err={err_code}: {err_msg_ws}")
-                    if 'margin' in str(err_msg_ws).lower() or 'Insufficient' in str(err_msg_ws):
-                        print(f"\n🛑 СТОП: Недостаточно маржи (WS) — бот остановлен!")
-                        raise SystemExit(1)
-                    return False, 0.0, (time.perf_counter()-t_start)*1000, True
-                if trade_vol > 0:
-                    pct        = trade_vol / volume * 100
-                    fill_price = float(ws_data.get('trade_avg_price', 0) or 0)
-                    elapsed_ms = (time.perf_counter() - t_start) * 1000
-                    print(f"✅ [HTX] {side} {symbol} | id={order_id} | "
-                          f"filled={trade_vol}/{volume} ({pct:.0f}%) | "
-                          f"avg={fill_price} | {elapsed_ms:.0f}ms")
-                    return True, fill_price, elapsed_ms, False
-                else:
-                    reason = "нет ликвидности" if status in (7, '7') else f"status={status}"
-                    print(f"❌ [HTX] НЕ ИСПОЛНЕН {side} {symbol} | {reason}")
-                    return False, 0.0, (time.perf_counter()-t_start)*1000, True
-
-            if http_result is not None and http_result.get('status') == 'ok':
-                print(f"⏳ [HTX] notify нет — опрашиваем REST...")
-                for rest_attempt in range(1, 9):
-                    if rest_attempt > 1:
-                        await asyncio.sleep(0.15 if rest_attempt <= 3 else 0.4)
-                    rest_data = await self._query_order_by_cid(symbol, cid_str)
-                    elapsed   = (time.perf_counter() - t_start) * 1000
-                    if rest_data.get('status') != 'ok':
-                        print(f"   [HTX] REST попытка {rest_attempt}: не удался — {rest_data.get('err-msg','?')}")
-                        continue
-                    orders = rest_data.get('data', {})
-                    if isinstance(orders, list) and orders:
-                        orders = orders[0]
-                    if not isinstance(orders, dict):
-                        continue
-                    trade_vol_r  = float(orders.get('trade_volume',   0) or 0)
-                    fill_price_r = float(orders.get('trade_avg_price', 0) or 0)
-                    order_status = orders.get('status', '?')
-                    print(f"   [HTX] REST попытка {rest_attempt}: status={order_status} filled={trade_vol_r}/{volume} avg={fill_price_r}")
-                    if trade_vol_r > 0:
-                        pct = trade_vol_r / volume * 100
-                        print(f"✅ [HTX] {side} {symbol} (REST) | filled={trade_vol_r}/{volume} ({pct:.0f}%) | avg={fill_price_r} | {elapsed:.0f}ms")
-                        return True, fill_price_r, elapsed, False
-                    if order_status in (7, '7', 5, '5') and trade_vol_r == 0:
-                        print(f"❌ [HTX] {side} {symbol}: нет ликвидности (status={order_status})")
-                        return False, 0.0, elapsed, True
-                    if order_status in (6, '6'):
-                        print(f"❌ [HTX] REST: ордер без исполнения (status={order_status})")
-                        return False, 0.0, elapsed, True
-                print(f"❌ [HTX] REST: 8 попыток — статус неизвестен")
-            else:
-                print(f"❌ [HTX] notify timeout (HTTP тоже не ответил)")
-            return False, 0.0, (time.perf_counter()-t_start)*1000, False
-
+        except SystemExit:
+            raise
         except Exception as e:
             if cid_str:
                 self.order_futures.pop(cid_str, None)
+                self.ws_place_futures.pop(cid_str, None)
             print(f"❌ [HTX] open_position: {e}")
             return False, 0.0, (time.perf_counter()-t_start)*1000, False
 
+    async def _rest_poll_or_parse(self, ws_data, symbol, side, volume,
+                                   cid_str, t_start, http_result, mode):
+        """Разбирает notify или делает REST-поллинг при отсутствии notify."""
+        if ws_data is not None:
+            trade_vol  = float(ws_data.get('trade_volume', 0) or 0)
+            err_code   = ws_data.get('err_code', 0)
+            status     = ws_data.get('status', '')
+            order_id   = ws_data.get('order_id', '?')
+            if err_code and err_code != 0:
+                err_msg_ws = ws_data.get('err_msg', '')
+                print(f"❌ [HTX] err={err_code}: {err_msg_ws}")
+                if 'margin' in str(err_msg_ws).lower() or 'Insufficient' in str(err_msg_ws):
+                    print(f"\n🛑 СТОП: Недостаточно маржи (WS) — бот остановлен!")
+                    raise SystemExit(1)
+                return False, 0.0, (time.perf_counter()-t_start)*1000, True
+            if trade_vol > 0:
+                pct        = trade_vol / volume * 100
+                fill_price = float(ws_data.get('trade_avg_price', 0) or 0)
+                elapsed_ms = (time.perf_counter() - t_start) * 1000
+                print(f"✅ [HTX] {side} {symbol} [{mode}] | id={order_id} | "
+                      f"filled={trade_vol}/{volume} ({pct:.0f}%) | avg={fill_price} | {elapsed_ms:.0f}ms")
+                return True, fill_price, elapsed_ms, False
+            reason = "нет ликвидности" if status in (7, '7') else f"status={status}"
+            print(f"❌ [HTX] НЕ ИСПОЛНЕН {side} {symbol} | {reason}")
+            return False, 0.0, (time.perf_counter()-t_start)*1000, True
+
+        if http_result and http_result.get('status') == 'ok':
+            print(f"⏳ [HTX] notify нет — опрашиваем REST...")
+            for attempt in range(1, 9):
+                if attempt > 1:
+                    await asyncio.sleep(0.15 if attempt <= 3 else 0.4)
+                rest_data = await self._query_order_by_cid(symbol, cid_str)
+                elapsed   = (time.perf_counter() - t_start) * 1000
+                if rest_data.get('status') != 'ok': continue
+                orders = rest_data.get('data', {})
+                if isinstance(orders, list) and orders: orders = orders[0]
+                if not isinstance(orders, dict): continue
+                trade_vol_r  = float(orders.get('trade_volume',   0) or 0)
+                fill_price_r = float(orders.get('trade_avg_price', 0) or 0)
+                order_status = orders.get('status', '?')
+                print(f"   [HTX] REST попытка {attempt}: status={order_status} "
+                      f"filled={trade_vol_r}/{volume} avg={fill_price_r}")
+                if trade_vol_r > 0:
+                    pct = trade_vol_r / volume * 100
+                    print(f"✅ [HTX] {side} {symbol} (REST poll) | "
+                          f"filled={trade_vol_r}/{volume} ({pct:.0f}%) | avg={fill_price_r} | {elapsed:.0f}ms")
+                    return True, fill_price_r, elapsed, False
+                if order_status in (7, '7', 5, '5') and trade_vol_r == 0:
+                    return False, 0.0, elapsed, True
+                if order_status in (6, '6'):
+                    return False, 0.0, elapsed, True
+            print(f"❌ [HTX] REST: 8 попыток — статус неизвестен")
+        elif mode == 'WS':
+            print(f"❌ [HTX] WS notify timeout — ордер неизвестен")
+        else:
+            print(f"❌ [HTX] notify timeout (HTTP тоже не ответил)")
+        return False, 0.0, (time.perf_counter()-t_start)*1000, False
+
     async def close_position(self, symbol: str, side: str, volume: int) -> bool:
         close_dir = 'sell' if side == 'buy' else 'buy'
-        cid_str = None
+        cid_str   = None
         try:
-            cid     = self._next_cid()
-            cid_str = str(cid)
-            params  = {
-                'contract_code':    symbol,
-                'client_order_id':  cid,
-                'direction':        close_dir,
-                'offset':           'close',
-                'lever_rate':       1,
-                'volume':           volume,
-                'order_price_type': 'optimal_5_ioc',
-            }
+            cid        = self._next_cid()
+            cid_str    = str(cid)
             notify_fut = asyncio.Future()
             self.order_futures[cid_str] = notify_fut
-            http_task = asyncio.create_task(self._http_post(params))
-            try:
-                result = await asyncio.wait_for(asyncio.shield(http_task), timeout=1.5)
-                if result.get('status') != 'ok':
-                    self.order_futures.pop(cid_str, None)
-                    err_msg = result.get('err-msg') or result.get('err_msg') or str(result)
-                    print(f"❌ [HTX] Закрытие отклонено: {err_msg}")
-                    return False
-                oid = result.get('data', {}).get('order_id', '?')
-                print(f"   [HTX] Закрытие принято id={oid}, ждём...")
-            except asyncio.TimeoutError:
-                http_task.add_done_callback(
-                    lambda t: t.exception() if not t.cancelled() else None)
-                print(f"   [HTX] Закрытие HTTP timeout, ждём WS...")
 
-            ws_data = None
+            # ── Fast path: WS ─────────────────────────────────────────────
+            ws_ok = False
             try:
-                ws_data = await asyncio.wait_for(notify_fut, timeout=0.3)
+                ws_ack = await self._ws_place(cid, symbol, close_dir, 'close', volume)
+                err_c  = ws_ack.get('err-code', 0)
+                if err_c != 0:
+                    self.order_futures.pop(cid_str, None)
+                    print(f"❌ [HTX] Закрытие WS отклонено [{err_c}]: {ws_ack.get('err-msg','')}")
+                    return False
+                ws_ok  = True
+                oid_ws = ws_ack.get('data', {}).get('order_id', '?')
+                print(f"   [HTX] WS закрытие принято id={oid_ws}, ждём...")
+            except SystemExit:
+                raise
+            except Exception as ws_err:
+                self.ws_place_futures.pop(cid_str, None)
+                print(f"   [HTX] Закрытие WS недоступен ({ws_err.__class__.__name__}), fallback REST...")
+
+            # ── Slow path: REST HTTP ───────────────────────────────────────
+            http_result = None
+            if not ws_ok:
+                params = {
+                    'contract_code':    symbol,
+                    'client_order_id':  cid,
+                    'direction':        close_dir,
+                    'offset':           'close',
+                    'lever_rate':       1,
+                    'volume':           volume,
+                    'order_price_type': 'opponent_ioc',
+                }
+                http_task = asyncio.create_task(self._http_post(params))
+                try:
+                    http_result = await asyncio.wait_for(asyncio.shield(http_task), timeout=1.5)
+                    if http_result.get('status') != 'ok':
+                        self.order_futures.pop(cid_str, None)
+                        err_msg = http_result.get('err-msg') or str(http_result)
+                        print(f"❌ [HTX] Закрытие REST отклонено: {err_msg}")
+                        return False
+                    oid = http_result.get('data', {}).get('order_id', '?')
+                    print(f"   [HTX] Закрытие REST принято id={oid}, ждём...")
+                except asyncio.TimeoutError:
+                    http_task.add_done_callback(
+                        lambda t: t.exception() if not t.cancelled() else None)
+                    print(f"   [HTX] Закрытие REST timeout, ждём WS notify...")
+
+            # ── Ожидаем fill notify ────────────────────────────────────────
+            ws_data = None
+            timeout = 2.5 if ws_ok else 0.3
+            try:
+                ws_data = await asyncio.wait_for(notify_fut, timeout=timeout)
             except asyncio.TimeoutError:
                 pass
             finally:
@@ -559,37 +660,42 @@ class HTXTrader:
 
             if ws_data is not None and float(ws_data.get('trade_volume', 0) or 0) > 0:
                 avg = float(ws_data.get('trade_avg_price', 0) or 0)
-                print(f"✅ [HTX] Закрыто {close_dir} {symbol} | vol={ws_data.get('trade_volume')} avg={avg}")
+                mode = 'WS' if ws_ok else 'REST'
+                print(f"✅ [HTX] Закрыто {close_dir} {symbol} [{mode}] | "
+                      f"vol={ws_data.get('trade_volume')} avg={avg}")
                 return True
 
-            for attempt in range(1, 9):
-                if attempt > 1:
-                    await asyncio.sleep(0.15 if attempt <= 3 else 0.4)
-                rest_d = await self._query_order_by_cid(symbol, cid_str)
-                if rest_d.get('status') != 'ok':
-                    continue
-                orders = rest_d.get('data', {})
-                if isinstance(orders, list) and orders:
-                    orders = orders[0]
-                if not isinstance(orders, dict):
-                    continue
-                trade_vol    = float(orders.get('trade_volume', 0) or 0)
-                order_status = orders.get('status', '?')
-                if trade_vol > 0:
-                    avg = float(orders.get('trade_avg_price', 0) or 0)
-                    print(f"✅ [HTX] Закрыто {close_dir} {symbol} | vol={trade_vol} avg={avg}")
-                    return True
-                if order_status in (7, '7', 5, '5'):
-                    print(f"❌ [HTX] Закрытие нет ликвидности (status={order_status})")
-                    return False
-                if order_status in (6, '6'):
-                    print(f"❌ [HTX] Закрытие без исполнения (status={order_status})")
-                    return False
-            print(f"❌ [HTX] Закрытие: REST 8 попыток — неизвестен")
+            if not ws_ok and http_result and http_result.get('status') == 'ok':
+                for attempt in range(1, 9):
+                    if attempt > 1:
+                        await asyncio.sleep(0.15 if attempt <= 3 else 0.4)
+                    rest_d = await self._query_order_by_cid(symbol, cid_str)
+                    if rest_d.get('status') != 'ok': continue
+                    orders = rest_d.get('data', {})
+                    if isinstance(orders, list) and orders: orders = orders[0]
+                    if not isinstance(orders, dict): continue
+                    trade_vol    = float(orders.get('trade_volume', 0) or 0)
+                    order_status = orders.get('status', '?')
+                    if trade_vol > 0:
+                        avg = float(orders.get('trade_avg_price', 0) or 0)
+                        print(f"✅ [HTX] Закрыто {close_dir} {symbol} | vol={trade_vol} avg={avg}")
+                        return True
+                    if order_status in (7, '7', 5, '5'):
+                        print(f"❌ [HTX] Закрытие нет ликвидности (status={order_status})")
+                        return False
+                    if order_status in (6, '6'):
+                        print(f"❌ [HTX] Закрытие без исполнения (status={order_status})")
+                        return False
+                print(f"❌ [HTX] Закрытие: REST 8 попыток — неизвестен")
+            elif ws_ok:
+                print(f"❌ [HTX] Закрытие WS notify timeout — ордер неизвестен")
             return False
+        except SystemExit:
+            raise
         except Exception as e:
             if cid_str:
                 self.order_futures.pop(cid_str, None)
+                self.ws_place_futures.pop(cid_str, None)
             print(f"❌ [HTX] close_position: {e}")
             return False
 
