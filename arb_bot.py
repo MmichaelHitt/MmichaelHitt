@@ -6,7 +6,6 @@ import hashlib
 import base64
 import gzip
 import ssl
-import socket
 from datetime import datetime
 from typing import Dict, Optional, List
 from urllib.parse import urlencode
@@ -150,7 +149,6 @@ class HTXTrader:
             connector=aiohttp.TCPConnector(
                 limit=10, ttl_dns_cache=300, keepalive_timeout=60,
                 enable_cleanup_closed=True, ssl=False,
-                socket_options=((socket.IPPROTO_TCP, socket.TCP_NODELAY, 1),),
             ),
             timeout=aiohttp.ClientTimeout(
                 total=2.0, connect=1.0, sock_connect=1.0, sock_read=1.5,
