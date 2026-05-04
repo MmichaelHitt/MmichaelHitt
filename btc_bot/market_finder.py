@@ -20,21 +20,25 @@ def _build_proxies(proxy_url: str) -> dict[str, str] | None:
     return {"http": proxy_url, "https": proxy_url}
 
 
+def _get_json(url: str, params: dict, proxy_url: str) -> list | None:
+    """GET with proxy; falls back to direct connection if proxy fails."""
+    for proxies in (_build_proxies(proxy_url), None):
+        try:
+            resp = requests.get(url, params=params, headers=HEADERS, timeout=8, proxies=proxies)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            if proxies is None:
+                return None
+    return None
+
+
 def _try_slug(slug: str, proxy_url: str = "") -> dict | None:
     """Request one slug, return market dict or None."""
-    proxies = _build_proxies(proxy_url)
+    events = _get_json(f"{GAMMA_API}/events", {"slug": slug}, proxy_url)
+    if not events:
+        return None
     try:
-        resp = requests.get(
-            f"{GAMMA_API}/events",
-            params={"slug": slug},
-            headers=HEADERS,
-            timeout=8,
-            proxies=proxies,
-        )
-        resp.raise_for_status()
-        events = resp.json()
-        if not events:
-            return None
         ev = events[0]
         mkt = ev["markets"][0]
         end_raw = mkt.get("endDate", "")
