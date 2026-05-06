@@ -61,6 +61,8 @@ class BotState:
         self.sl_order_id: str | None = None
         self.buy_order_id: str | None = None
         self.position_size: float = 0.0
+        self.entry_price_cents: float = 0.0
+        self.sl_triggered: bool = False
 
 
 def market_watcher_thread(
@@ -104,6 +106,8 @@ def market_watcher_thread(
                 state.sl_order_id = None
                 state.buy_order_id = None
                 state.position_size = 0.0
+                state.entry_price_cents = 0.0
+                state.sl_triggered = False
 
             clob.restart(next_market["up_token"], next_market["dn_token"])
 
@@ -125,6 +129,9 @@ async def trading_loop(
         with state.lock:
             market = dict(state.current_market)
             entered = state.entered_this_round
+            sl_triggered = state.sl_triggered
+            entry_px = state.entry_price_cents
+            pos_size = state.position_size
 
         if not market:
             continue
@@ -147,6 +154,20 @@ async def trading_loop(
             "[%s] [%s] Binance=%s OKX=%s | UP ask=%s | %ss left | entered=%s",
             now_str, slug_short, b_str, o_str, ask_str, secs, entered,
         )
+
+        # ── SL monitoring (dry-run: exchange handles this in live mode) ────
+        if entered and not sl_triggered and up_ask is not None:
+            sl_cents = cfg.sl_price_cents
+            if up_ask <= sl_cents:
+                with state.lock:
+                    if not state.sl_triggered:
+                        state.sl_triggered = True
+                pnl = (sl_cents - entry_px) * pos_size / 100
+                logger.warning(
+                    "[BOT] SL triggered! ask=%.1f¢ | entry=%.1f¢ | pnl≈%.4f USDC",
+                    up_ask, entry_px, pnl,
+                )
+                log_trade(market.get("slug", ""), "SL", up_ask, pnl=pnl)
 
         # ── Entry logic ────────────────────────────────────────────────────
         if up_ask is None or b_px is None or o_px is None:
@@ -174,6 +195,8 @@ async def trading_loop(
             state.buy_order_id = buy_id
             state.sl_order_id = sl_id
             state.position_size = sl_size
+            state.entry_price_cents = up_ask
+            state.sl_triggered = False
 
         logger.info(
             "[BOT] Entered: buy_id=%s sl_id=%s price=%.2f size=%.4f",
