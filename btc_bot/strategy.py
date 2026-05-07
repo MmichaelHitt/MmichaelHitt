@@ -42,3 +42,28 @@ def should_enter(
 def compute_sl_price() -> float:
     """Rule 5: stop-loss limit sell price in USDC (fractional)."""
     return SL_PRICE_USDC
+
+
+def choose_side(
+    seconds_left: int | float,
+    up_ask: float | None,
+    dn_ask: float | None,
+    binance_px: float,
+    okx_px: float,
+    already_in: bool,
+) -> str | None:
+    """
+    Returns 'UP', 'DN', or None.
+    Checks UP first; if UP ask not in range, checks DN ask.
+    """
+    if already_in:
+        return None
+    if not check_entry_window(seconds_left):
+        return None
+    if not check_gap_filter(binance_px, okx_px):
+        return None
+    if up_ask is not None and check_ask_filter(up_ask):
+        return "UP"
+    if dn_ask is not None and check_ask_filter(dn_ask):
+        return "DN"
+    return None

@@ -6,6 +6,7 @@ from btc_bot.strategy import (
     check_ask_filter,
     check_entry_window,
     check_gap_filter,
+    choose_side,
     compute_sl_price,
     should_enter,
 )
@@ -129,6 +130,43 @@ class TestShouldEnter:
     def test_boundary_gap_just_over_3(self):
         assert should_enter(seconds_left=30, up_ask_cents=85,
                             binance_px=65000, okx_px=65003.01, already_in=False) is False
+
+
+class TestChooseSide:
+    B = dict(seconds_left=30, binance_px=65000.0, okx_px=65001.0, already_in=False)
+
+    def test_up_ask_in_range_returns_up(self):
+        assert choose_side(up_ask=85.0, dn_ask=None, **self.B) == "UP"
+
+    def test_dn_ask_in_range_returns_dn(self):
+        assert choose_side(up_ask=None, dn_ask=85.0, **self.B) == "DN"
+
+    def test_up_takes_priority_over_dn(self):
+        assert choose_side(up_ask=85.0, dn_ask=85.0, **self.B) == "UP"
+
+    def test_neither_in_range_returns_none(self):
+        assert choose_side(up_ask=95.0, dn_ask=95.0, **self.B) is None
+
+    def test_both_none_returns_none(self):
+        assert choose_side(up_ask=None, dn_ask=None, **self.B) is None
+
+    def test_already_in_returns_none(self):
+        assert choose_side(up_ask=85.0, dn_ask=85.0,
+                           seconds_left=30, binance_px=65000, okx_px=65001,
+                           already_in=True) is None
+
+    def test_outside_window_returns_none(self):
+        assert choose_side(up_ask=85.0, dn_ask=None,
+                           seconds_left=200, binance_px=65000, okx_px=65001,
+                           already_in=False) is None
+
+    def test_gap_too_large_returns_none(self):
+        assert choose_side(up_ask=85.0, dn_ask=None,
+                           seconds_left=30, binance_px=65000, okx_px=65010,
+                           already_in=False) is None
+
+    def test_dn_ask_out_of_range_returns_none(self):
+        assert choose_side(up_ask=None, dn_ask=95.0, **self.B) is None
 
 
 class TestComputeSlPrice:

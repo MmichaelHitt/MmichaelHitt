@@ -24,7 +24,7 @@ from btc_bot.logger_setup import setup_logger
 from btc_bot.market_finder import find_latest_active_market, find_next_market
 from btc_bot.order_manager import OrderManager
 from btc_bot.price_feeds import PriceFeed
-from btc_bot.strategy import compute_sl_price, should_enter
+from btc_bot.strategy import choose_side, compute_sl_price
 
 TRADES_CSV = Path(__file__).parent / "trades.csv"
 POLL_INTERVAL = 0.5
@@ -63,6 +63,7 @@ class BotState:
         self.position_size: float = 0.0
         self.entry_price_cents: float = 0.0
         self.sl_triggered: bool = False
+        self.position_side: str = ""  # "UP" or "DN"
 
 
 def market_watcher_thread(
@@ -108,6 +109,7 @@ def market_watcher_thread(
                 state.position_size = 0.0
                 state.entry_price_cents = 0.0
                 state.sl_triggered = False
+                state.position_side = ""
 
             clob.restart(next_market["up_token"], next_market["dn_token"])
 
@@ -132,6 +134,7 @@ async def trading_loop(
             sl_triggered = state.sl_triggered
             entry_px = state.entry_price_cents
             pos_size = state.position_size
+            pos_side = state.position_side
 
         if not market:
             continue
@@ -141,6 +144,7 @@ async def trading_loop(
             continue
 
         up_ask = clob.up_ask
+        dn_ask = clob.dn_ask
         b_px = price_feed.binance_price
         o_px = price_feed.okx_price
 
@@ -149,36 +153,41 @@ async def trading_loop(
         now_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         b_str = f"${b_px:,.2f}" if b_px else "—"
         o_str = f"${o_px:,.2f}" if o_px else "—"
-        ask_str = f"{up_ask:.1f}¢" if up_ask is not None else "—"
+        up_str = f"{up_ask:.1f}¢" if up_ask is not None else "—"
+        dn_str = f"{dn_ask:.1f}¢" if dn_ask is not None else "—"
         logger.info(
-            "[%s] [%s] Binance=%s OKX=%s | UP ask=%s | %ss left | entered=%s",
-            now_str, slug_short, b_str, o_str, ask_str, secs, entered,
+            "[%s] [%s] Binance=%s OKX=%s | UP=%s DN=%s | %ss left | entered=%s%s",
+            now_str, slug_short, b_str, o_str, up_str, dn_str, secs, entered,
+            f"({pos_side})" if entered and pos_side else "",
         )
 
         # ── SL monitoring (dry-run: exchange handles this in live mode) ────
-        if entered and not sl_triggered and up_ask is not None:
-            sl_cents = cfg.sl_price_cents
-            if up_ask <= sl_cents:
+        if entered and not sl_triggered:
+            position_ask = up_ask if pos_side == "UP" else dn_ask
+            if position_ask is not None and position_ask <= cfg.sl_price_cents:
                 with state.lock:
                     if not state.sl_triggered:
                         state.sl_triggered = True
-                pnl = (sl_cents - entry_px) * pos_size / 100
+                pnl = (cfg.sl_price_cents - entry_px) * pos_size / 100
                 logger.warning(
-                    "[BOT] SL triggered! ask=%.1f¢ | entry=%.1f¢ | pnl≈%.4f USDC",
-                    up_ask, entry_px, pnl,
+                    "[BOT] SL triggered! %s ask=%.1f¢ | entry=%.1f¢ | pnl≈%.4f USDC",
+                    pos_side, position_ask, entry_px, pnl,
                 )
-                log_trade(market.get("slug", ""), "SL", up_ask, pnl=pnl)
+                log_trade(market.get("slug", ""), f"SL_{pos_side}", position_ask, pnl=pnl)
 
         # ── Entry logic ────────────────────────────────────────────────────
-        if up_ask is None or b_px is None or o_px is None:
+        if b_px is None or o_px is None:
             continue
 
-        if not should_enter(secs, up_ask, b_px, o_px, entered):
+        side = choose_side(secs, up_ask, dn_ask, b_px, o_px, entered)
+        if side is None:
             continue
+
+        entry_ask = up_ask if side == "UP" else dn_ask
+        entry_token = market.get("up_token" if side == "UP" else "dn_token", "")
 
         # Place buy
-        up_token = market.get("up_token", "")
-        buy_id = order_mgr.place_buy_market(up_token, cfg.position_usdc)
+        buy_id = order_mgr.place_buy_market(entry_token, cfg.position_usdc)
         if buy_id is None:
             logger.warning("[BOT] Buy order failed, skipping round")
             continue
@@ -188,21 +197,22 @@ async def trading_loop(
         sl_size = cfg.position_usdc / sl_price
 
         # Place SL
-        sl_id = order_mgr.place_sl_limit(up_token, sl_price, sl_size)
+        sl_id = order_mgr.place_sl_limit(entry_token, sl_price, sl_size)
 
         with state.lock:
             state.entered_this_round = True
             state.buy_order_id = buy_id
             state.sl_order_id = sl_id
             state.position_size = sl_size
-            state.entry_price_cents = up_ask
+            state.entry_price_cents = entry_ask
             state.sl_triggered = False
+            state.position_side = side
 
         logger.info(
-            "[BOT] Entered: buy_id=%s sl_id=%s price=%.2f size=%.4f",
-            buy_id, sl_id, up_ask, sl_size,
+            "[BOT] Entered %s: buy_id=%s sl_id=%s price=%.2f size=%.4f",
+            side, buy_id, sl_id, entry_ask, sl_size,
         )
-        log_trade(market.get("slug", ""), "BUY", up_ask)
+        log_trade(market.get("slug", ""), f"BUY_{side}", entry_ask)
 
 
 async def main_async(cfg: Config, logger) -> None:

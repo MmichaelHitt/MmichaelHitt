@@ -33,6 +33,13 @@ def future_market(seconds: int = 120) -> dict:
     }
 
 
+def make_clob(up_ask: float | None = 85.0, dn_ask: float | None = None) -> MagicMock:
+    mock = MagicMock()
+    mock.up_ask = up_ask
+    mock.dn_ask = dn_ask
+    return mock
+
+
 class TestSecondsToClose:
     def test_future_date_returns_positive(self):
         end = (datetime.now(timezone.utc) + timedelta(seconds=30)).strftime(
@@ -58,9 +65,9 @@ class TestLogTrade:
         orig = bot_module.TRADES_CSV
         bot_module.TRADES_CSV = tmp_path / "trades.csv"
         try:
-            log_trade("btc-updown-5m-123", "BUY", 85.0)
+            log_trade("btc-updown-5m-123", "BUY_UP", 85.0)
             content = (tmp_path / "trades.csv").read_text()
-            assert "BUY" in content
+            assert "BUY_UP" in content
             assert "85.0" in content
             assert "btc-updown-5m-123" in content
         finally:
@@ -71,7 +78,7 @@ class TestLogTrade:
         orig = bot_module.TRADES_CSV
         bot_module.TRADES_CSV = tmp_path / "trades.csv"
         try:
-            log_trade("slug", "BUY", 85.0)
+            log_trade("slug", "BUY_UP", 85.0)
             content = (tmp_path / "trades.csv").read_text()
             assert "date" in content
             assert "slug" in content
@@ -92,9 +99,7 @@ class TestTradingLoopSingleEntry:
         market = future_market(seconds=40)
         state = make_state(market)
 
-        mock_clob = MagicMock()
-        mock_clob.up_ask = 85.0
-
+        mock_clob = make_clob(up_ask=85.0, dn_ask=None)
         mock_feed = MagicMock()
         mock_feed.binance_price = 65000.0
         mock_feed.okx_price = 65001.0
@@ -133,9 +138,7 @@ class TestTradingLoopSingleEntry:
         state = make_state(market)
         state.entered_this_round = True
 
-        mock_clob = MagicMock()
-        mock_clob.up_ask = 85.0
-
+        mock_clob = make_clob(up_ask=85.0, dn_ask=None)
         mock_feed = MagicMock()
         mock_feed.binance_price = 65000.0
         mock_feed.okx_price = 65001.0
@@ -167,9 +170,7 @@ class TestTradingLoopSingleEntry:
         market = future_market(seconds=40)
         state = make_state(market)
 
-        mock_clob = MagicMock()
-        mock_clob.up_ask = 95.0  # out of 80-90 range
-
+        mock_clob = make_clob(up_ask=95.0, dn_ask=None)  # both out of 80-90 range
         mock_feed = MagicMock()
         mock_feed.binance_price = 65000.0
         mock_feed.okx_price = 65001.0
@@ -202,9 +203,7 @@ class TestTradingLoopSingleEntry:
         market = future_market(seconds=200)
         state = make_state(market)
 
-        mock_clob = MagicMock()
-        mock_clob.up_ask = 85.0
-
+        mock_clob = make_clob(up_ask=85.0, dn_ask=None)
         mock_feed = MagicMock()
         mock_feed.binance_price = 65000.0
         mock_feed.okx_price = 65001.0
@@ -240,9 +239,7 @@ class TestTradingLoopSingleEntry:
         market = future_market(seconds=40)
         state = make_state(market)
 
-        mock_clob = MagicMock()
-        mock_clob.up_ask = 85.0
-
+        mock_clob = make_clob(up_ask=85.0, dn_ask=None)
         mock_feed = MagicMock()
         mock_feed.binance_price = 65000.0
         mock_feed.okx_price = 65001.0
@@ -272,6 +269,48 @@ class TestTradingLoopSingleEntry:
         mock_order_mgr.place_sl_limit.assert_called_once()
         call_args = mock_order_mgr.place_sl_limit.call_args
         assert call_args[0][1] == pytest.approx(0.72)
+
+        bot_module.TRADES_CSV = orig_csv
+
+    @pytest.mark.asyncio
+    async def test_enters_dn_when_dn_ask_in_range(self, tmp_path):
+        import btc_bot.bot as bot_module
+        orig_csv = bot_module.TRADES_CSV
+        bot_module.TRADES_CSV = tmp_path / "trades.csv"
+
+        cfg = make_config(dry_run=True)
+        market = future_market(seconds=40)
+        state = make_state(market)
+
+        mock_clob = make_clob(up_ask=None, dn_ask=85.0)
+        mock_feed = MagicMock()
+        mock_feed.binance_price = 65000.0
+        mock_feed.okx_price = 65001.0
+
+        mock_order_mgr = MagicMock()
+        mock_order_mgr.place_buy_market.return_value = "dry-buy-dn"
+        mock_order_mgr.place_sl_limit.return_value = "dry-sl-dn"
+
+        import logging
+        logger = logging.getLogger("test_bot_dn")
+
+        tick_count = 0
+
+        async def fake_sleep(seconds):
+            nonlocal tick_count
+            tick_count += 1
+            if tick_count >= 3:
+                raise asyncio.CancelledError()
+
+        with patch("btc_bot.bot.asyncio.sleep", new=fake_sleep), \
+             patch("btc_bot.bot.log_trade"):
+            try:
+                await trading_loop(state, mock_feed, mock_clob, mock_order_mgr, cfg, logger)
+            except asyncio.CancelledError:
+                pass
+
+        mock_order_mgr.place_buy_market.assert_called_once_with("dn_token_xyz", cfg.position_usdc)
+        assert state.position_side == "DN"
 
         bot_module.TRADES_CSV = orig_csv
 
@@ -306,7 +345,6 @@ class TestMarketWatcherThread:
         logger = logging.getLogger("test_watcher")
 
         switched_event = threading.Event()
-        original_restart = mock_clob.restart.side_effect
 
         def on_restart(*args, **kwargs):
             switched_event.set()
