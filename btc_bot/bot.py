@@ -216,6 +216,11 @@ async def trading_loop(
 
         # Place SL
         sl_id = order_mgr.place_sl_limit(entry_token, sl_price, sl_size)
+        if sl_id is None:
+            logger.error(
+                "[BOT] SL placement FAILED — %s position is UNPROTECTED! size=%.4f entry=%.2f¢",
+                side, sl_size, entry_ask,
+            )
 
         with state.lock:
             state.entered_this_round = True

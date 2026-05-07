@@ -60,11 +60,17 @@ def _try_slug(slug: str, proxy_url: str = "") -> dict | None:
         return None
 
 
-def _scan_slugs(base_ts: int, count: int = 10, proxy_url: str = "") -> list[dict]:
+def _scan_slugs(
+    base_ts: int,
+    count: int = 10,
+    proxy_url: str = "",
+    stop_at_first: bool = False,
+) -> list[dict]:
     """
     Scan slugs of form {PREFIX}-{ts} starting at base_ts,
     stepping 300 s, for count iterations.
     Returns list of found market dicts.
+    If stop_at_first is True, returns as soon as the first match is found.
     """
     found: list[dict] = []
     for delta in range(count):
@@ -74,6 +80,8 @@ def _scan_slugs(base_ts: int, count: int = 10, proxy_url: str = "") -> list[dict
         if item:
             found.append(item)
             logger.info("[scan] ✅ %s", slug)
+            if stop_at_first:
+                break
     return found
 
 
@@ -118,7 +126,7 @@ def find_next_market(current_end_date_iso: str, proxy_url: str = "") -> dict | N
         current_end = datetime.now(timezone.utc)
 
     current_ts = int(current_end.timestamp())
-    candidates = _scan_slugs(current_ts, count=8, proxy_url=proxy_url)
+    candidates = _scan_slugs(current_ts, count=8, proxy_url=proxy_url, stop_at_first=True)
     candidates = [c for c in candidates if c["end_dt"] > current_end]
 
     if not candidates:
