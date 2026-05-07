@@ -268,7 +268,9 @@ class TestTradingLoopSingleEntry:
 
         mock_order_mgr.place_sl_limit.assert_called_once()
         call_args = mock_order_mgr.place_sl_limit.call_args
+        # arg[1] = sl_price (0.72 USDC), arg[2] = sl_size = position_usdc / (entry_ask/100)
         assert call_args[0][1] == pytest.approx(0.72)
+        assert call_args[0][2] == pytest.approx(2.0 / (85.0 / 100))
 
         bot_module.TRADES_CSV = orig_csv
 

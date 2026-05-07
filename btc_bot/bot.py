@@ -196,15 +196,23 @@ async def trading_loop(
         entry_ask = up_ask if side == "UP" else dn_ask
         entry_token = market.get("up_token" if side == "UP" else "dn_token", "")
 
+        # Cancel previous SL order if re-entering after stop-loss
+        with state.lock:
+            old_sl_id = state.sl_order_id
+        if old_sl_id:
+            order_mgr.cancel_order(old_sl_id)
+            with state.lock:
+                state.sl_order_id = None
+
         # Place buy
         buy_id = order_mgr.place_buy_market(entry_token, cfg.position_usdc)
         if buy_id is None:
             logger.warning("[BOT] Buy order failed, skipping round")
             continue
 
-        # Compute SL size: USDC / SL_price
+        # sl_size = tokens actually purchased (position_usdc / entry_price_usdc)
         sl_price = compute_sl_price()
-        sl_size = cfg.position_usdc / sl_price
+        sl_size = cfg.position_usdc / (entry_ask / 100)
 
         # Place SL
         sl_id = order_mgr.place_sl_limit(entry_token, sl_price, sl_size)
