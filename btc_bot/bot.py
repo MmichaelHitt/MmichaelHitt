@@ -64,6 +64,7 @@ class BotState:
         self.entry_price_cents: float = 0.0
         self.sl_triggered: bool = False
         self.position_side: str = ""  # "UP" or "DN"
+        self.sl_count: int = 0  # SL triggers this round; re-entry allowed while < 1
 
 
 def market_watcher_thread(
@@ -110,6 +111,7 @@ def market_watcher_thread(
                 state.entry_price_cents = 0.0
                 state.sl_triggered = False
                 state.position_side = ""
+                state.sl_count = 0
 
             clob.restart(next_market["up_token"], next_market["dn_token"])
 
@@ -135,6 +137,7 @@ async def trading_loop(
             entry_px = state.entry_price_cents
             pos_size = state.position_size
             pos_side = state.position_side
+            sl_count = state.sl_count
 
         if not market:
             continue
@@ -165,13 +168,20 @@ async def trading_loop(
         if entered and not sl_triggered:
             position_ask = up_ask if pos_side == "UP" else dn_ask
             if position_ask is not None and position_ask <= cfg.sl_price_cents:
+                allow_reentry = False
                 with state.lock:
                     if not state.sl_triggered:
                         state.sl_triggered = True
+                        state.sl_count += 1
+                        if state.sl_count <= 1:
+                            allow_reentry = True
+                            state.entered_this_round = False
+                            state.position_side = ""
                 pnl = (cfg.sl_price_cents - entry_px) * pos_size / 100
                 logger.warning(
-                    "[BOT] SL triggered! %s ask=%.1f¢ | entry=%.1f¢ | pnl≈%.4f USDC",
+                    "[BOT] SL triggered! %s ask=%.1f¢ | entry=%.1f¢ | pnl≈%.4f USDC%s",
                     pos_side, position_ask, entry_px, pnl,
+                    " | re-entry allowed" if allow_reentry else " | no more re-entries",
                 )
                 log_trade(market.get("slug", ""), f"SL_{pos_side}", position_ask, pnl=pnl)
 
@@ -207,6 +217,7 @@ async def trading_loop(
             state.entry_price_cents = entry_ask
             state.sl_triggered = False
             state.position_side = side
+            # sl_count intentionally NOT reset here — limits re-entries per round
 
         logger.info(
             "[BOT] Entered %s: buy_id=%s sl_id=%s price=%.2f size=%.4f",

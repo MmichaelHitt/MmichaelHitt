@@ -315,6 +315,104 @@ class TestTradingLoopSingleEntry:
         bot_module.TRADES_CSV = orig_csv
 
 
+    @pytest.mark.asyncio
+    async def test_reentry_allowed_after_first_sl(self, tmp_path):
+        import btc_bot.bot as bot_module
+        orig_csv = bot_module.TRADES_CSV
+        bot_module.TRADES_CSV = tmp_path / "trades.csv"
+
+        cfg = make_config(dry_run=True)
+        market = future_market(seconds=40)
+        state = make_state(market)
+
+        # Tick 1: up_ask=85 → enter UP
+        # Tick 2: up_ask=60 → SL triggers, re-entry allowed
+        # Tick 3: up_ask=85 → re-enter
+        # Tick 4: cancel
+        asks = [85.0, 60.0, 85.0, 85.0]
+        tick = [0]
+
+        mock_clob = MagicMock()
+        mock_clob.dn_ask = None
+
+        mock_feed = MagicMock()
+        mock_feed.binance_price = 65000.0
+        mock_feed.okx_price = 65001.0
+
+        mock_order_mgr = MagicMock()
+        mock_order_mgr.place_buy_market.return_value = "dry-buy-x"
+        mock_order_mgr.place_sl_limit.return_value = "dry-sl-x"
+
+        import logging
+        logger = logging.getLogger("test_reentry")
+
+        async def fake_sleep(seconds):
+            mock_clob.up_ask = asks[tick[0]] if tick[0] < len(asks) else 85.0
+            tick[0] += 1
+            if tick[0] >= len(asks):
+                raise asyncio.CancelledError()
+
+        with patch("btc_bot.bot.asyncio.sleep", new=fake_sleep), \
+             patch("btc_bot.bot.log_trade"):
+            try:
+                await trading_loop(state, mock_feed, mock_clob, mock_order_mgr, cfg, logger)
+            except asyncio.CancelledError:
+                pass
+
+        assert mock_order_mgr.place_buy_market.call_count == 2
+        assert state.sl_count == 1
+
+        bot_module.TRADES_CSV = orig_csv
+
+    @pytest.mark.asyncio
+    async def test_no_reentry_after_second_sl(self, tmp_path):
+        import btc_bot.bot as bot_module
+        orig_csv = bot_module.TRADES_CSV
+        bot_module.TRADES_CSV = tmp_path / "trades.csv"
+
+        cfg = make_config(dry_run=True)
+        market = future_market(seconds=40)
+        state = make_state(market)
+        # Pre-set: already had one SL, re-entered
+        state.entered_this_round = True
+        state.sl_count = 1
+        state.sl_triggered = False
+        state.position_side = "UP"
+        state.entry_price_cents = 85.0
+        state.position_size = 2.0 / 0.72
+
+        mock_clob = make_clob(up_ask=60.0, dn_ask=None)  # SL level
+        mock_feed = MagicMock()
+        mock_feed.binance_price = 65000.0
+        mock_feed.okx_price = 65001.0
+
+        mock_order_mgr = MagicMock()
+
+        import logging
+        logger = logging.getLogger("test_no_reentry")
+
+        tick_count = [0]
+
+        async def fake_sleep(seconds):
+            tick_count[0] += 1
+            if tick_count[0] >= 3:
+                raise asyncio.CancelledError()
+
+        with patch("btc_bot.bot.asyncio.sleep", new=fake_sleep), \
+             patch("btc_bot.bot.log_trade"):
+            try:
+                await trading_loop(state, mock_feed, mock_clob, mock_order_mgr, cfg, logger)
+            except asyncio.CancelledError:
+                pass
+
+        # Second SL should NOT reset entered_this_round
+        assert state.sl_count == 2
+        assert state.entered_this_round is True
+        mock_order_mgr.place_buy_market.assert_not_called()
+
+        bot_module.TRADES_CSV = orig_csv
+
+
 class TestMarketWatcherThread:
     def test_resets_entered_flag_on_switch(self):
         cfg = make_config()
