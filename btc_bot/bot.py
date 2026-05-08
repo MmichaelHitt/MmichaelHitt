@@ -173,7 +173,7 @@ async def trading_loop(
                     if not state.sl_triggered:
                         state.sl_triggered = True
                         state.sl_count += 1
-                        if state.sl_count <= 1:
+                        if state.sl_count <= 2:
                             allow_reentry = True
                             state.entered_this_round = False
                             state.position_side = ""
