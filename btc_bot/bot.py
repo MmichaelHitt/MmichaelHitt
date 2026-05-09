@@ -177,13 +177,18 @@ async def trading_loop(
                             allow_reentry = True
                             state.entered_this_round = False
                             state.position_side = ""
-                pnl = (cfg.sl_price_cents - entry_px) * pos_size / 100
+                pnl_limit = (cfg.sl_price_cents - entry_px) * pos_size / 100
+                pnl_market = (position_ask - entry_px) * pos_size / 100
+                gapped = position_ask < cfg.sl_price_cents
                 logger.warning(
-                    "[BOT] SL triggered! %s ask=%.1f¢ | entry=%.1f¢ | pnl≈%.4f USDC%s",
-                    pos_side, position_ask, entry_px, pnl,
+                    "[BOT] SL triggered! %s ask=%.1f¢ | entry=%.1f¢ | "
+                    "pnl if limit filled @ %.0f¢ ≈ %.4f USDC%s%s",
+                    pos_side, position_ask, entry_px,
+                    cfg.sl_price_cents, pnl_limit,
+                    f" | GAPPED — if unfilled pnl ≈ {pnl_market:.4f} USDC" if gapped else "",
                     " | re-entry allowed" if allow_reentry else " | no more re-entries",
                 )
-                log_trade(market.get("slug", ""), f"SL_{pos_side}", position_ask, pnl=pnl)
+                log_trade(market.get("slug", ""), f"SL_{pos_side}", position_ask, pnl=pnl_limit)
 
         # ── Entry logic ────────────────────────────────────────────────────
         if b_px is None or o_px is None:
