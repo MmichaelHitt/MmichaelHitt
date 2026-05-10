@@ -69,6 +69,7 @@ class OrderManager:
             order_args = MarketOrderArgs(
                 token_id=token_id,
                 amount=usdc_amount,
+                side=BUY,
             )
             signed_order = self._client.create_market_order(order_args)
             resp = self._client.post_order(signed_order)
