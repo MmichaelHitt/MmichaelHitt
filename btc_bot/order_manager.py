@@ -80,6 +80,36 @@ class OrderManager:
             logger.error("[ORDER] place_buy_market failed: %s", e)
             return None
 
+    def place_sell_market(self, token_id: str, size: float) -> str | None:
+        """
+        Place a market sell order for size units of token_id.
+        Used to close a position immediately when SL limit gapped.
+        Returns order_id or None on failure.
+        """
+        if self._dry_run:
+            fake_id = f"dry-sell-{uuid.uuid4().hex[:8]}"
+            logger.info(
+                "%s place_sell_market token=%s size=%.4f → fake_id=%s",
+                _DRY_RUN_PREFIX, token_id, size, fake_id,
+            )
+            return fake_id
+
+        try:
+            from py_clob_client.clob_types import MarketOrderArgs
+            from py_clob_client.order_builder.constants import SELL
+
+            assert self._client is not None
+            order_args = MarketOrderArgs(token_id=token_id, amount=size, side=SELL)
+            signed_order = self._client.create_market_order(order_args)
+            resp = self._client.post_order(signed_order)
+            order_id: str = resp.get("orderID") or resp.get("order_id", "")
+            logger.info("[ORDER] Sell market placed: token=%s size=%.4f id=%s",
+                        token_id, size, order_id)
+            return order_id or None
+        except Exception as e:
+            logger.error("[ORDER] place_sell_market failed: %s", e)
+            return None
+
     def place_sl_limit(self, token_id: str, price: float, size: float) -> str | None:
         """
         Place a limit sell order (stop-loss) at price for size units.

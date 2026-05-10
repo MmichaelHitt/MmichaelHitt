@@ -164,7 +164,7 @@ async def trading_loop(
             f"({pos_side})" if entered and pos_side else "",
         )
 
-        # ── SL monitoring (dry-run: exchange handles this in live mode) ────
+        # ── SL monitoring ────────────────────────────────────────────────────
         if entered and not sl_triggered:
             position_ask = up_ask if pos_side == "UP" else dn_ask
             if position_ask is not None and position_ask <= cfg.sl_price_cents:
@@ -177,18 +177,36 @@ async def trading_loop(
                             allow_reentry = True
                             state.entered_this_round = False
                             state.position_side = ""
-                pnl_limit = (cfg.sl_price_cents - entry_px) * pos_size / 100
-                pnl_market = (position_ask - entry_px) * pos_size / 100
+
                 gapped = position_ask < cfg.sl_price_cents
+                if gapped:
+                    # Price gapped below SL limit: cancel the limit order and
+                    # close the position immediately with a market sell.
+                    with state.lock:
+                        old_sl_id = state.sl_order_id
+                        state.sl_order_id = None
+                    if old_sl_id:
+                        order_mgr.cancel_order(old_sl_id)
+                    position_token = market.get(
+                        "up_token" if pos_side == "UP" else "dn_token", ""
+                    )
+                    if position_token:
+                        sell_id = order_mgr.place_sell_market(position_token, pos_size)
+                        if sell_id is None:
+                            logger.error(
+                                "[BOT] Market sell FAILED after gap — position may be open!"
+                            )
+                        else:
+                            logger.info("[BOT] Gap-close market sell placed: id=%s", sell_id)
+
+                pnl = (position_ask - entry_px) * pos_size / 100
                 logger.warning(
-                    "[BOT] SL triggered! %s ask=%.1f¢ | entry=%.1f¢ | "
-                    "pnl if limit filled @ %.0f¢ ≈ %.4f USDC%s%s",
-                    pos_side, position_ask, entry_px,
-                    cfg.sl_price_cents, pnl_limit,
-                    f" | GAPPED — if unfilled pnl ≈ {pnl_market:.4f} USDC" if gapped else "",
+                    "[BOT] SL triggered! %s ask=%.1f¢ | entry=%.1f¢ | pnl≈%.4f USDC%s%s",
+                    pos_side, position_ask, entry_px, pnl,
+                    " | GAPPED → market sell" if gapped else f" | limit @ {cfg.sl_price_cents:.0f}¢",
                     " | re-entry allowed" if allow_reentry else " | no more re-entries",
                 )
-                log_trade(market.get("slug", ""), f"SL_{pos_side}", position_ask, pnl=pnl_limit)
+                log_trade(market.get("slug", ""), f"SL_{pos_side}", position_ask, pnl=pnl)
 
         # ── Entry logic ────────────────────────────────────────────────────
         if b_px is None or o_px is None:

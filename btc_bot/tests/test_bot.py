@@ -464,6 +464,109 @@ class TestTradingLoopSingleEntry:
         bot_module.TRADES_CSV = orig_csv
 
 
+class TestGapClose:
+    """When price gaps below SL price, limit is cancelled and market sell placed."""
+
+    @pytest.mark.asyncio
+    async def test_gap_cancels_limit_and_places_market_sell(self, tmp_path):
+        import btc_bot.bot as bot_module
+        orig_csv = bot_module.TRADES_CSV
+        bot_module.TRADES_CSV = tmp_path / "trades.csv"
+
+        cfg = make_config(dry_run=True)
+        market = future_market(seconds=40)
+        state = make_state(market)
+        state.entered_this_round = True
+        state.sl_triggered = False
+        state.position_side = "UP"
+        state.entry_price_cents = 85.0
+        state.position_size = 2.0 / 0.85
+        state.sl_order_id = "existing-sl-123"
+
+        # ask=61¢ — strictly below SL limit 72¢ → gap
+        mock_clob = make_clob(up_ask=61.0, dn_ask=None)
+        mock_feed = MagicMock()
+        mock_feed.binance_price = 65000.0
+        mock_feed.okx_price = 65001.0
+
+        mock_order_mgr = MagicMock()
+        mock_order_mgr.cancel_order.return_value = True
+        mock_order_mgr.place_sell_market.return_value = "dry-sell-abc"
+
+        import logging
+        logger = logging.getLogger("test_gap_close")
+
+        tick_count = [0]
+
+        async def fake_sleep(seconds):
+            tick_count[0] += 1
+            if tick_count[0] >= 3:
+                raise asyncio.CancelledError()
+
+        with patch("btc_bot.bot.asyncio.sleep", new=fake_sleep), \
+             patch("btc_bot.bot.log_trade"):
+            try:
+                await trading_loop(state, mock_feed, mock_clob, mock_order_mgr, cfg, logger)
+            except asyncio.CancelledError:
+                pass
+
+        mock_order_mgr.cancel_order.assert_called_once_with("existing-sl-123")
+        mock_order_mgr.place_sell_market.assert_called_once()
+        # token passed should be up_token
+        args = mock_order_mgr.place_sell_market.call_args[0]
+        assert args[0] == "up_token_abc"
+        assert state.sl_order_id is None
+
+        bot_module.TRADES_CSV = orig_csv
+
+    @pytest.mark.asyncio
+    async def test_exact_sl_price_no_market_sell(self, tmp_path):
+        """ask == sl_price_cents exactly: limit should fill, no market sell needed."""
+        import btc_bot.bot as bot_module
+        orig_csv = bot_module.TRADES_CSV
+        bot_module.TRADES_CSV = tmp_path / "trades.csv"
+
+        cfg = make_config(dry_run=True)
+        market = future_market(seconds=40)
+        state = make_state(market)
+        state.entered_this_round = True
+        state.sl_triggered = False
+        state.position_side = "UP"
+        state.entry_price_cents = 85.0
+        state.position_size = 2.0 / 0.85
+        state.sl_order_id = "existing-sl-456"
+
+        # ask == SL price exactly (72¢) → limit should fill, no gap
+        mock_clob = make_clob(up_ask=float(cfg.sl_price_cents), dn_ask=None)
+        mock_feed = MagicMock()
+        mock_feed.binance_price = 65000.0
+        mock_feed.okx_price = 65001.0
+
+        mock_order_mgr = MagicMock()
+
+        import logging
+        logger = logging.getLogger("test_exact_sl")
+
+        tick_count = [0]
+
+        async def fake_sleep(seconds):
+            tick_count[0] += 1
+            if tick_count[0] >= 3:
+                raise asyncio.CancelledError()
+
+        with patch("btc_bot.bot.asyncio.sleep", new=fake_sleep), \
+             patch("btc_bot.bot.log_trade"):
+            try:
+                await trading_loop(state, mock_feed, mock_clob, mock_order_mgr, cfg, logger)
+            except asyncio.CancelledError:
+                pass
+
+        mock_order_mgr.cancel_order.assert_not_called()
+        mock_order_mgr.place_sell_market.assert_not_called()
+
+        bot_module.TRADES_CSV = orig_csv
+
+
 class TestMarketWatcherThread:
     def test_resets_entered_flag_on_switch(self):
         cfg = make_config()
