@@ -296,6 +296,7 @@ async def main_async(cfg: Config, logger) -> None:
         api_secret=cfg.poly_api_secret,
         passphrase=cfg.poly_api_passphrase,
         private_key=cfg.poly_wallet_private_key,
+        funder_address=cfg.poly_funder_address,
         proxy_url=cfg.proxy_url,
         dry_run=cfg.dry_run,
     )

@@ -4,10 +4,13 @@ from __future__ import annotations
 import argparse
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Always load .env from the same directory as this file,
+# regardless of the working directory the user launches from.
+load_dotenv(Path(__file__).parent / ".env")
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,7 @@ class Config:
     poly_api_secret: str = ""
     poly_api_passphrase: str = ""
     poly_wallet_private_key: str = ""
+    poly_funder_address: str = ""
 
     # Infrastructure
     proxy_url: str = ""
@@ -82,6 +86,7 @@ def load_config(argv: list[str] | None = None) -> Config:
         poly_api_secret=os.getenv("POLY_API_SECRET") or os.getenv("POLY_SECRET", ""),
         poly_api_passphrase=os.getenv("POLY_API_PASSPHRASE") or os.getenv("POLY_PASSPHRASE", ""),
         poly_wallet_private_key=os.getenv("POLY_WALLET_PRIVATE_KEY") or os.getenv("PRIVATE_KEY", ""),
+        poly_funder_address=os.getenv("POLY_FUNDER_ADDRESS", ""),
         # Infrastructure
         proxy_url=os.getenv("PROXY_URL", "http://mh2457652:r8hzakNM2T@82.206.73.210:50100"),
         dry_run=dry_run,

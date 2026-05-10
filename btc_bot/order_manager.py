@@ -17,6 +17,7 @@ class OrderManager:
         api_secret: str,
         passphrase: str,
         private_key: str,
+        funder_address: str = "",
         proxy_url: str = "",
         dry_run: bool = False,
     ) -> None:
@@ -25,12 +26,19 @@ class OrderManager:
         self._client: Any | None = None
 
         if not dry_run:
-            self._client = self._build_client(api_key, api_secret, passphrase, private_key)
+            self._client = self._build_client(
+                api_key, api_secret, passphrase, private_key, funder_address
+            )
 
     # ── Client factory ───────────────────────────────────────────────────────
 
     def _build_client(
-        self, api_key: str, api_secret: str, passphrase: str, private_key: str
+        self,
+        api_key: str,
+        api_secret: str,
+        passphrase: str,
+        private_key: str,
+        funder_address: str = "",
     ) -> Any:
         from py_clob_client.client import ClobClient
         from py_clob_client.clob_types import ApiCreds
@@ -38,12 +46,21 @@ class OrderManager:
         host = "https://clob.polymarket.com"
         chain_id = 137  # Polygon mainnet
 
+        # py_clob_client expects the key without 0x prefix
+        key = private_key.removeprefix("0x")
+
         creds = ApiCreds(
             api_key=api_key,
             api_secret=api_secret,
             api_passphrase=passphrase,
         )
-        client = ClobClient(host, key=private_key, chain_id=chain_id, creds=creds)
+        client = ClobClient(
+            host,
+            key=key,
+            chain_id=chain_id,
+            creds=creds,
+            funder=funder_address or None,
+        )
         return client
 
     # ── Public API ───────────────────────────────────────────────────────────
