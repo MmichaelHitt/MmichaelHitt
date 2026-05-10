@@ -81,12 +81,12 @@ def load_config(argv: list[str] | None = None) -> Config:
         gap_max=args.gap_max or _float("GAP_MAX_USD", 3.0),
         position_usdc=args.position_usdc or _float("POSITION_USDC", 2.0),
         switch_before_end_sec=_int("SWITCH_BEFORE_END_SEC", 8),
-        # Credentials — support both naming conventions
-        poly_api_key=os.getenv("POLY_API_KEY", ""),
-        poly_api_secret=os.getenv("POLY_API_SECRET") or os.getenv("POLY_SECRET", ""),
-        poly_api_passphrase=os.getenv("POLY_API_PASSPHRASE") or os.getenv("POLY_PASSPHRASE", ""),
-        poly_wallet_private_key=os.getenv("POLY_WALLET_PRIVATE_KEY") or os.getenv("PRIVATE_KEY", ""),
-        poly_funder_address=os.getenv("POLY_FUNDER_ADDRESS", ""),
+        # Credentials — support both naming conventions; strip whitespace/CRLF
+        poly_api_key=(os.getenv("POLY_API_KEY", "")).strip(),
+        poly_api_secret=(os.getenv("POLY_API_SECRET") or os.getenv("POLY_SECRET", "")).strip(),
+        poly_api_passphrase=(os.getenv("POLY_API_PASSPHRASE") or os.getenv("POLY_PASSPHRASE", "")).strip(),
+        poly_wallet_private_key=(os.getenv("POLY_WALLET_PRIVATE_KEY") or os.getenv("PRIVATE_KEY", "")).strip(),
+        poly_funder_address=(os.getenv("POLY_FUNDER_ADDRESS", "")).strip(),
         # Infrastructure
         proxy_url=os.getenv("PROXY_URL", "http://mh2457652:r8hzakNM2T@82.206.73.210:50100"),
         dry_run=dry_run,

@@ -281,6 +281,29 @@ async def main_async(cfg: Config, logger) -> None:
     logger.info("  dry_run=%s", cfg.dry_run)
     logger.info("=" * 60)
 
+    # ── Credential check ────────────────────────────────────────────────────
+    if not cfg.dry_run:
+        missing = [
+            name for name, val in [
+                ("PRIVATE_KEY / POLY_WALLET_PRIVATE_KEY", cfg.poly_wallet_private_key),
+                ("POLY_API_KEY",                          cfg.poly_api_key),
+                ("POLY_SECRET / POLY_API_SECRET",         cfg.poly_api_secret),
+                ("POLY_PASSPHRASE / POLY_API_PASSPHRASE", cfg.poly_api_passphrase),
+            ] if not val.strip()
+        ]
+        if missing:
+            for m in missing:
+                logger.error("[CONFIG] Missing credential: %s", m)
+            raise RuntimeError(
+                "Missing credentials — bot cannot run in live mode. "
+                "Check that .env is in the btc_bot/ folder and all keys are filled in."
+            )
+        logger.info(
+            "[CONFIG] Credentials OK: key=%s... funder=%s",
+            cfg.poly_wallet_private_key[:6],
+            cfg.poly_funder_address[:10] if cfg.poly_funder_address else "(none)",
+        )
+
     logger.info("Searching for active round...")
     market = find_latest_active_market(proxy_url=cfg.proxy_url, slug_override=cfg.market_slug_override)
     logger.info("Active round: %s  end=%s", market["slug"], market["end_date"])
