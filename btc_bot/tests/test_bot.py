@@ -610,10 +610,11 @@ class TestMarketWatcherThread:
             if sleep_calls[0] > 5:
                 raise SystemExit()
 
+        mock_order_mgr = MagicMock()
         with patch("btc_bot.bot.find_next_market", return_value=next_market), \
              patch("btc_bot.bot.time.sleep", side_effect=fake_sleep):
             try:
-                market_watcher_thread(state, mock_clob, cfg, logger)
+                market_watcher_thread(state, mock_clob, cfg, mock_order_mgr, logger)
             except SystemExit:
                 pass
 

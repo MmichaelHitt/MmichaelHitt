@@ -64,13 +64,14 @@ class BotState:
         self.entry_price_cents: float = 0.0
         self.sl_triggered: bool = False
         self.position_side: str = ""  # "UP" or "DN"
-        self.sl_count: int = 0  # SL triggers this round; re-entry allowed while < 1
+        self.sl_count: int = 0  # SL triggers this round; re-entry allowed while <= 2
 
 
 def market_watcher_thread(
     state: BotState,
     clob: ClobStream,
     cfg: Config,
+    order_mgr: OrderManager,
     logger,
 ) -> None:
     switched = False
@@ -103,6 +104,11 @@ def market_watcher_thread(
 
             logger.info("[AutoSwitch] Switching to: %s", next_market["slug"])
             with state.lock:
+                old_sl_id = state.sl_order_id
+            if old_sl_id:
+                order_mgr.cancel_order(old_sl_id)
+            with state.lock:
+                state.current_market.clear()
                 state.current_market.update(next_market)
                 state.entered_this_round = False
                 state.sl_order_id = None
@@ -292,7 +298,7 @@ async def main_async(cfg: Config, logger) -> None:
 
     threading.Thread(
         target=market_watcher_thread,
-        args=(state, clob, cfg, logger),
+        args=(state, clob, cfg, order_mgr, logger),
         daemon=True,
         name="MarketWatcher",
     ).start()

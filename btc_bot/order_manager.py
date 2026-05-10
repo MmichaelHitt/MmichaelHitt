@@ -96,15 +96,22 @@ class OrderManager:
             return fake_id
 
         try:
-            from py_clob_client.clob_types import MarketOrderArgs
+            from py_clob_client.clob_types import OrderArgs
             from py_clob_client.order_builder.constants import SELL
 
             assert self._client is not None
-            order_args = MarketOrderArgs(token_id=token_id, amount=size, side=SELL)
-            signed_order = self._client.create_market_order(order_args)
+            # Aggressive limit at 0.01 USDC — fills immediately at best bid.
+            # Safer than MarketOrderArgs(side=SELL) which is not officially supported.
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=0.01,
+                size=size,
+                side=SELL,
+            )
+            signed_order = self._client.create_order(order_args)
             resp = self._client.post_order(signed_order)
             order_id: str = resp.get("orderID") or resp.get("order_id", "")
-            logger.info("[ORDER] Sell market placed: token=%s size=%.4f id=%s",
+            logger.info("[ORDER] Gap-close sell placed: token=%s size=%.4f id=%s",
                         token_id, size, order_id)
             return order_id or None
         except Exception as e:
