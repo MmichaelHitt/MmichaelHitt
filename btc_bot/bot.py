@@ -218,7 +218,14 @@ async def trading_loop(
         if b_px is None or o_px is None:
             continue
 
-        side = choose_side(secs, up_ask, dn_ask, b_px, o_px, entered)
+        side = choose_side(
+            secs, up_ask, dn_ask, b_px, o_px, entered,
+            entry_min=cfg.entry_window_min,
+            entry_max=cfg.entry_window_max,
+            ask_min=cfg.ask_min,
+            ask_max=cfg.ask_max,
+            gap_max=cfg.gap_max,
+        )
         if side is None:
             continue
 
@@ -240,7 +247,7 @@ async def trading_loop(
             continue
 
         # sl_size = tokens actually purchased (position_usdc / entry_price_usdc)
-        sl_price = compute_sl_price()
+        sl_price = compute_sl_price(cfg.sl_price_cents)
         sl_size = cfg.position_usdc / (entry_ask / 100)
 
         # Place SL
