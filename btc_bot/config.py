@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,7 +11,12 @@ from dotenv import load_dotenv
 
 # Always load .env from the same directory as this file,
 # regardless of the working directory the user launches from.
-load_dotenv(Path(__file__).parent / ".env")
+_ENV_PATH = Path(__file__).parent / ".env"
+_ENV_LOADED = load_dotenv(_ENV_PATH)
+print(f"[CONFIG] Looking for .env at: {_ENV_PATH}", file=sys.stderr)
+print(f"[CONFIG] .env exists: {_ENV_PATH.exists()}  loaded: {_ENV_LOADED}", file=sys.stderr)
+if _ENV_PATH.exists():
+    print(f"[CONFIG] .env keys found: {sorted(k for k in os.environ if k.startswith(('POLY_', 'PRIVATE_', 'PROXY_', 'POSITION_', 'SL_', 'ASK_', 'ENTRY_', 'GAP_', 'DRY_', 'MARKET_')))}", file=sys.stderr)
 
 
 @dataclass(frozen=True)
